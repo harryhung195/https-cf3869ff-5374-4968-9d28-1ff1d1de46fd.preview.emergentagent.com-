@@ -137,15 +137,18 @@ backend:
 
   - task: "Shopping Cart API"
     implemented: true
-    working: "NA"
+    working: true
     file: "/app/backend/server.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
       - working: "NA"
         agent: "main"
         comment: "Implemented cart management with add/remove items, user-specific cart handling"
+      - working: true
+        agent: "testing"
+        comment: "Fixed a bug in the get_cart function where it was returning Cart(**cart) without checking if cart was a Cart object. After fixing, tested cart operations including getting empty cart, adding items, and removing items. All cart endpoints are now working correctly."
 
   - task: "Stripe Payment Integration"
     implemented: false
