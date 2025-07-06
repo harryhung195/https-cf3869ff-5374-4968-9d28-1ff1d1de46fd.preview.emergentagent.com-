@@ -1,6 +1,6 @@
 import React, { useState, useEffect, createContext, useContext } from "react";
 import "./App.css";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useSearchParams } from "react-router-dom";
 import axios from "axios";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -90,6 +90,7 @@ const useAuth = () => {
 const Header = () => {
   const { user, logout } = useAuth();
   const [cartCount, setCartCount] = useState(0);
+  const [showCart, setShowCart] = useState(false);
 
   useEffect(() => {
     if (user) {
@@ -105,6 +106,10 @@ const Header = () => {
     } catch (error) {
       console.error("Error fetching cart:", error);
     }
+  };
+
+  const toggleCart = () => {
+    setShowCart(!showCart);
   };
 
   return (
@@ -126,7 +131,10 @@ const Header = () => {
             {user ? (
               <>
                 <div className="relative">
-                  <button className="flex items-center text-gray-700 hover:text-blue-600 transition-colors">
+                  <button 
+                    onClick={toggleCart}
+                    className="flex items-center text-gray-700 hover:text-blue-600 transition-colors"
+                  >
                     <svg className="w-6 h-6 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3h2l.4 2M7 13h10l4-8H5.4m0 0L7 13m0 0l-1.5 5L7 13zm0 0L7 13m10 0a1 1 0 11-2 0 1 1 0 012 0zm-10 4a1 1 0 11-2 0 1 1 0 012 0z" />
                     </svg>
@@ -160,7 +168,142 @@ const Header = () => {
           </div>
         </div>
       </div>
+      
+      {showCart && <CartDropdown onClose={() => setShowCart(false)} onCartUpdate={fetchCartCount} />}
     </header>
+  );
+};
+
+const CartDropdown = ({ onClose, onCartUpdate }) => {
+  const [cart, setCart] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchCart();
+  }, []);
+
+  const fetchCart = async () => {
+    try {
+      const response = await axios.get(`${API}/cart`);
+      setCart(response.data);
+      
+      // Fetch product details for each cart item
+      const cartWithProducts = await Promise.all(
+        response.data.items.map(async (item) => {
+          const productResponse = await axios.get(`${API}/products/${item.product_id}`);
+          return {
+            ...item,
+            product: productResponse.data
+          };
+        })
+      );
+      
+      setCart({ ...response.data, items: cartWithProducts });
+    } catch (error) {
+      console.error("Error fetching cart:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const removeFromCart = async (productId) => {
+    try {
+      await axios.delete(`${API}/cart/remove/${productId}`);
+      fetchCart();
+      onCartUpdate();
+    } catch (error) {
+      console.error("Error removing from cart:", error);
+    }
+  };
+
+  const getTotalPrice = () => {
+    if (!cart || !cart.items) return 0;
+    return cart.items.reduce((total, item) => total + (item.product.price * item.quantity), 0);
+  };
+
+  const handleCheckout = async () => {
+    try {
+      const originUrl = window.location.origin;
+      const response = await axios.post(`${API}/payments/checkout`, {
+        items: cart.items.map(item => ({
+          product_id: item.product_id,
+          quantity: item.quantity
+        })),
+        origin_url: originUrl
+      });
+
+      // Redirect to Stripe checkout
+      window.location.href = response.data.url;
+    } catch (error) {
+      console.error("Error creating checkout session:", error);
+      alert("Failed to create checkout session. Please try again.");
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="absolute right-0 top-16 w-80 bg-white border shadow-lg rounded-lg p-4 z-50">
+        <div className="flex justify-center items-center h-32">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="absolute right-0 top-16 w-80 bg-white border shadow-lg rounded-lg p-4 z-50">
+      <div className="flex justify-between items-center mb-4">
+        <h3 className="text-lg font-semibold">Shopping Cart</h3>
+        <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+
+      {cart && cart.items && cart.items.length > 0 ? (
+        <>
+          <div className="max-h-60 overflow-y-auto">
+            {cart.items.map((item) => (
+              <div key={item.product_id} className="flex items-center justify-between py-2 border-b">
+                <div className="flex items-center">
+                  <img 
+                    src={item.product.image_url} 
+                    alt={item.product.name}
+                    className="w-10 h-10 object-cover rounded mr-3"
+                  />
+                  <div>
+                    <p className="text-sm font-medium">{item.product.name}</p>
+                    <p className="text-xs text-gray-500">${item.product.price} x {item.quantity}</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => removeFromCart(item.product_id)}
+                  className="text-red-500 hover:text-red-700 text-sm"
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+          
+          <div className="mt-4 pt-4 border-t">
+            <div className="flex justify-between items-center mb-4">
+              <span className="font-semibold">Total: ${getTotalPrice().toFixed(2)}</span>
+            </div>
+            
+            <button
+              onClick={handleCheckout}
+              className="w-full bg-blue-500 text-white py-2 px-4 rounded-lg hover:bg-blue-600 transition-colors"
+            >
+              Checkout
+            </button>
+          </div>
+        </>
+      ) : (
+        <p className="text-gray-500 text-center py-8">Your cart is empty</p>
+      )}
+    </div>
   );
 };
 
@@ -237,6 +380,8 @@ const ProductGrid = () => {
         quantity: 1
       });
       alert("Item added to cart!");
+      // Trigger cart update in header
+      window.dispatchEvent(new Event('cartUpdated'));
     } catch (error) {
       console.error("Error adding to cart:", error);
       alert("Failed to add item to cart");
@@ -318,6 +463,119 @@ const ProductGrid = () => {
         </div>
       </div>
     </section>
+  );
+};
+
+const PaymentSuccess = () => {
+  const [searchParams] = useSearchParams();
+  const [paymentStatus, setPaymentStatus] = useState("loading");
+  const [statusMessage, setStatusMessage] = useState("Checking payment status...");
+
+  useEffect(() => {
+    const sessionId = searchParams.get("session_id");
+    if (sessionId) {
+      checkPaymentStatus(sessionId);
+    } else {
+      setPaymentStatus("error");
+      setStatusMessage("No payment session found");
+    }
+  }, [searchParams]);
+
+  const checkPaymentStatus = async (sessionId, attempt = 0) => {
+    const maxAttempts = 10;
+    const pollInterval = 2000;
+
+    try {
+      const response = await axios.get(`${API}/payments/status/${sessionId}`);
+      const status = response.data;
+
+      if (status.payment_status === "paid") {
+        setPaymentStatus("success");
+        setStatusMessage("Payment successful! Thank you for your purchase.");
+      } else if (status.status === "expired") {
+        setPaymentStatus("error");
+        setStatusMessage("Payment session expired. Please try again.");
+      } else if (attempt < maxAttempts) {
+        setStatusMessage("Processing payment...");
+        setTimeout(() => checkPaymentStatus(sessionId, attempt + 1), pollInterval);
+      } else {
+        setPaymentStatus("error");
+        setStatusMessage("Payment verification timed out. Please contact support.");
+      }
+    } catch (error) {
+      setPaymentStatus("error");
+      setStatusMessage("Error checking payment status. Please contact support.");
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="max-w-md w-full bg-white rounded-lg shadow-lg p-8 text-center">
+        {paymentStatus === "loading" && (
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600 mx-auto mb-4"></div>
+        )}
+        
+        {paymentStatus === "success" && (
+          <div className="text-green-600 mb-4">
+            <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+          </div>
+        )}
+        
+        {paymentStatus === "error" && (
+          <div className="text-red-600 mb-4">
+            <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </div>
+        )}
+        
+        <h2 className="text-2xl font-bold mb-4">Payment Status</h2>
+        <p className="text-gray-600 mb-6">{statusMessage}</p>
+        
+        <button
+          onClick={() => window.location.href = "/"}
+          className="bg-blue-500 text-white px-6 py-3 rounded-lg hover:bg-blue-600 transition-colors"
+        >
+          Return to Store
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const PaymentCancel = () => {
+  return (
+    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="max-w-md w-full bg-white rounded-lg shadow-lg p-8 text-center">
+        <div className="text-yellow-600 mb-4">
+          <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+          </svg>
+        </div>
+        
+        <h2 className="text-2xl font-bold mb-4">Payment Cancelled</h2>
+        <p className="text-gray-600 mb-6">
+          Your payment was cancelled. You can try again or continue shopping.
+        </p>
+        
+        <div className="flex space-x-4">
+          <button
+            onClick={() => window.location.href = "/"}
+            className="flex-1 bg-gray-500 text-white px-6 py-3 rounded-lg hover:bg-gray-600 transition-colors"
+          >
+            Continue Shopping
+          </button>
+          <button
+            onClick={() => window.location.href = "/#products"}
+            className="flex-1 bg-blue-500 text-white px-6 py-3 rounded-lg hover:bg-blue-600 transition-colors"
+          >
+            Try Again
+          </button>
+        </div>
+      </div>
+    </div>
   );
 };
 
@@ -473,6 +731,8 @@ function App() {
         <BrowserRouter>
           <Routes>
             <Route path="/" element={<Home />} />
+            <Route path="/payment/success" element={<PaymentSuccess />} />
+            <Route path="/payment/cancel" element={<PaymentCancel />} />
           </Routes>
         </BrowserRouter>
       </div>

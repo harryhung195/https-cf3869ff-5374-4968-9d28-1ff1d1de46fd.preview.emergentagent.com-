@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 import uuid
+from emergentintegrations.payments.stripe.checkout import StripeCheckout, CheckoutSessionResponse, CheckoutStatusResponse, CheckoutSessionRequest
 
 # Load environment variables
 ROOT_DIR = Path(__file__).parent
@@ -21,6 +22,10 @@ load_dotenv(ROOT_DIR / '.env')
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
+
+# Stripe setup
+stripe_api_key = os.environ.get('STRIPE_SECRET_KEY')
+stripe_checkout = StripeCheckout(api_key=stripe_api_key)
 
 # Create the main app
 app = FastAPI()
@@ -95,6 +100,14 @@ class PaymentTransaction(BaseModel):
 class CheckoutRequest(BaseModel):
     items: List[CartItem]
     origin_url: str
+
+class PaymentStatusResponse(BaseModel):
+    status: str
+    payment_status: str
+    amount_total: float
+    currency: str
+    transaction_id: str
+    message: str
 
 # Auth helpers
 def hash_password(password: str) -> str:
@@ -300,24 +313,150 @@ async def remove_from_cart(product_id: str, current_user: UserResponse = Depends
     
     return {"message": "Item removed from cart"}
 
-# Payment routes (placeholder for Stripe integration)
+@api_router.put("/cart/clear")
+async def clear_cart(current_user: UserResponse = Depends(get_current_user)):
+    cart = await db.carts.find_one({"user_id": current_user.id})
+    if cart:
+        cart_obj = Cart(**cart)
+        cart_obj.items = []
+        cart_obj.updated_at = datetime.utcnow()
+        await db.carts.replace_one({"user_id": current_user.id}, cart_obj.dict())
+    
+    return {"message": "Cart cleared"}
+
+# Payment routes
 @api_router.post("/payments/checkout")
 async def create_checkout_session(checkout_data: CheckoutRequest, current_user: UserResponse = Depends(get_current_user)):
-    # Calculate total amount
+    # Calculate total amount from cart items
     total_amount = 0.0
+    product_details = []
+    
     for item in checkout_data.items:
         product = await db.products.find_one({"id": item.product_id})
-        if product:
-            total_amount += product["price"] * item.quantity
+        if not product:
+            raise HTTPException(status_code=404, detail=f"Product {item.product_id} not found")
+        
+        item_total = float(product["price"]) * item.quantity
+        total_amount += item_total
+        product_details.append({
+            "product_id": item.product_id,
+            "name": product["name"],
+            "price": product["price"],
+            "quantity": item.quantity,
+            "total": item_total
+        })
     
-    # For now, return a placeholder response
-    # This will be replaced with actual Stripe integration
-    return {
-        "message": "Checkout session created",
-        "total_amount": total_amount,
-        "items": checkout_data.items,
-        "note": "Stripe integration pending - need secret key"
+    if total_amount <= 0:
+        raise HTTPException(status_code=400, detail="Invalid cart total")
+    
+    # Create success and cancel URLs
+    success_url = f"{checkout_data.origin_url}/payment/success?session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{checkout_data.origin_url}/payment/cancel"
+    
+    # Create metadata
+    metadata = {
+        "user_id": current_user.id,
+        "user_email": current_user.email,
+        "product_count": str(len(checkout_data.items)),
+        "source": "ecommerce_cart"
     }
+    
+    try:
+        # Create Stripe checkout session
+        checkout_request = CheckoutSessionRequest(
+            amount=total_amount,
+            currency="usd",
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata=metadata
+        )
+        
+        session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(checkout_request)
+        
+        # Store payment transaction in database
+        payment_transaction = PaymentTransaction(
+            user_id=current_user.id,
+            session_id=session.session_id,
+            amount=total_amount,
+            currency="usd",
+            status="pending",
+            payment_status="unpaid",
+            metadata={
+                **metadata,
+                "product_details": str(product_details)
+            }
+        )
+        
+        await db.payment_transactions.insert_one(payment_transaction.dict())
+        
+        return {
+            "url": session.url,
+            "session_id": session.session_id,
+            "amount": total_amount,
+            "currency": "usd"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error creating checkout session: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create checkout session")
+
+@api_router.get("/payments/status/{session_id}", response_model=PaymentStatusResponse)
+async def get_payment_status(session_id: str, current_user: UserResponse = Depends(get_current_user)):
+    try:
+        # Get payment status from Stripe
+        checkout_status: CheckoutStatusResponse = await stripe_checkout.get_checkout_status(session_id)
+        
+        # Find the payment transaction in our database
+        transaction = await db.payment_transactions.find_one({"session_id": session_id})
+        if not transaction:
+            raise HTTPException(status_code=404, detail="Payment transaction not found")
+        
+        # Check if user owns this transaction
+        if transaction["user_id"] != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Update transaction status if it has changed
+        if (transaction["status"] != checkout_status.status or 
+            transaction["payment_status"] != checkout_status.payment_status):
+            
+            await db.payment_transactions.update_one(
+                {"session_id": session_id},
+                {
+                    "$set": {
+                        "status": checkout_status.status,
+                        "payment_status": checkout_status.payment_status,
+                        "updated_at": datetime.utcnow()
+                    }
+                }
+            )
+            
+            # If payment is successful, clear the user's cart
+            if checkout_status.payment_status == "paid":
+                await db.carts.update_one(
+                    {"user_id": current_user.id},
+                    {"$set": {"items": [], "updated_at": datetime.utcnow()}}
+                )
+        
+        return PaymentStatusResponse(
+            status=checkout_status.status,
+            payment_status=checkout_status.payment_status,
+            amount_total=checkout_status.amount_total / 100,  # Convert from cents
+            currency=checkout_status.currency,
+            transaction_id=transaction["id"],
+            message=f"Payment is {checkout_status.payment_status}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting payment status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get payment status")
+
+@api_router.get("/payments/transactions")
+async def get_user_transactions(current_user: UserResponse = Depends(get_current_user)):
+    transactions = await db.payment_transactions.find(
+        {"user_id": current_user.id}
+    ).sort("created_at", -1).to_list(50)
+    
+    return [PaymentTransaction(**transaction) for transaction in transactions]
 
 # Include the router in the main app
 app.include_router(api_router)
