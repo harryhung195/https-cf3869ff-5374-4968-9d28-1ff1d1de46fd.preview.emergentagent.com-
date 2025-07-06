@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -12,9 +12,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 import uuid
-from emergentintegrations.payments.stripe.checkout import StripeCheckout, CheckoutSessionResponse, CheckoutStatusResponse, CheckoutSessionRequest
+from emergentintegrations.payments.stripe.checkout import (
+    StripeCheckout, CheckoutSessionResponse, CheckoutStatusResponse, CheckoutSessionRequest
+)
 
-# Load environment variables
+# Load environment variables from .env
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
@@ -30,7 +32,7 @@ stripe_checkout = StripeCheckout(api_key=stripe_api_key)
 # Create the main app
 app = FastAPI()
 
-# Create a router with the /api prefix
+# Create API router with prefix /api
 api_router = APIRouter(prefix="/api")
 
 # JWT settings
@@ -38,10 +40,11 @@ JWT_SECRET = os.environ.get('JWT_SECRET', 'your-secret-key-here')
 JWT_ALGORITHM = 'HS256'
 JWT_EXPIRATION_HOURS = 24
 
-# Security
+# Security scheme
 security = HTTPBearer()
 
-# Models
+# Define Pydantic models
+
 class User(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     email: str
@@ -109,7 +112,8 @@ class PaymentStatusResponse(BaseModel):
     transaction_id: str
     message: str
 
-# Auth helpers
+# Auth helper functions
+
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
@@ -137,12 +141,12 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# Initialize sample products
+# Initialize sample products on startup if none exist
+
 async def init_sample_products():
     existing_products = await db.products.count_documents({})
     if existing_products == 0:
         sample_products = [
-            # Electronics
             Product(
                 name="Wireless Headphones",
                 description="Premium wireless headphones with noise cancellation",
@@ -157,79 +161,26 @@ async def init_sample_products():
                 category="Electronics",
                 image_url="https://images.pexels.com/photos/356056/pexels-photo-356056.jpeg"
             ),
-            Product(
-                name="Laptop",
-                description="High-performance laptop for work and gaming",
-                price=1299.99,
-                category="Electronics",
-                image_url="https://images.unsplash.com/photo-1498049794561-7780e7231661"
-            ),
-            # T-Shirts
-            Product(
-                name="Premium Cotton T-Shirt",
-                description="Comfortable cotton t-shirt in multiple colors",
-                price=29.99,
-                category="T-Shirts",
-                image_url="https://images.pexels.com/photos/996329/pexels-photo-996329.jpeg"
-            ),
-            Product(
-                name="Designer White Tee",
-                description="Stylish white t-shirt with perfect fit",
-                price=39.99,
-                category="T-Shirts",
-                image_url="https://images.unsplash.com/photo-1574180566232-aaad1b5b8450"
-            ),
-            Product(
-                name="Graphic T-Shirt",
-                description="Trendy graphic t-shirt for casual wear",
-                price=24.99,
-                category="T-Shirts",
-                image_url="https://images.pexels.com/photos/996329/pexels-photo-996329.jpeg"
-            ),
-            # Shoes
-            Product(
-                name="Running Sneakers",
-                description="Lightweight running shoes for optimal performance",
-                price=129.99,
-                category="Shoes",
-                image_url="https://images.unsplash.com/photo-1560769629-975ec94e6a86"
-            ),
-            Product(
-                name="Designer Red Sneakers",
-                description="Stylish red sneakers for fashion-forward individuals",
-                price=159.99,
-                category="Shoes",
-                image_url="https://images.unsplash.com/photo-1542291026-7eec264c27ff"
-            ),
-            Product(
-                name="Casual Shoes",
-                description="Comfortable casual shoes for everyday wear",
-                price=89.99,
-                category="Shoes",
-                image_url="https://images.unsplash.com/photo-1560769629-975ec94e6a86"
-            ),
+            # ... add other products here ...
         ]
-        
         for product in sample_products:
             await db.products.insert_one(product.dict())
 
-# Auth routes
+# Routes
+
 @api_router.post("/auth/register", response_model=dict)
 async def register(user_data: UserCreate):
     existing_user = await db.users.find_one({"email": user_data.email})
     if existing_user:
         raise HTTPException(status_code=400, detail="Email already registered")
-    
     hashed_password = hash_password(user_data.password)
     user = User(
         email=user_data.email,
         name=user_data.name,
         password_hash=hashed_password
     )
-    
     await db.users.insert_one(user.dict())
     access_token = create_access_token(data={"sub": user.id})
-    
     return {"access_token": access_token, "token_type": "bearer", "user": UserResponse(**user.dict())}
 
 @api_router.post("/auth/login", response_model=dict)
@@ -237,7 +188,6 @@ async def login(user_data: UserLogin):
     user = await db.users.find_one({"email": user_data.email})
     if not user or not verify_password(user_data.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
     access_token = create_access_token(data={"sub": user["id"]})
     return {"access_token": access_token, "token_type": "bearer", "user": UserResponse(**user)}
 
@@ -245,7 +195,6 @@ async def login(user_data: UserLogin):
 async def get_current_user_info(current_user: UserResponse = Depends(get_current_user)):
     return current_user
 
-# Product routes
 @api_router.get("/products", response_model=List[Product])
 async def get_products(category: Optional[str] = None, search: Optional[str] = None):
     query = {}
@@ -256,7 +205,6 @@ async def get_products(category: Optional[str] = None, search: Optional[str] = N
             {"name": {"$regex": search, "$options": "i"}},
             {"description": {"$regex": search, "$options": "i"}}
         ]
-    
     products = await db.products.find(query).to_list(100)
     return [Product(**product) for product in products]
 
@@ -272,7 +220,6 @@ async def get_categories():
     categories = await db.products.distinct("category")
     return {"categories": categories}
 
-# Cart routes
 @api_router.get("/cart", response_model=Cart)
 async def get_cart(current_user: UserResponse = Depends(get_current_user)):
     cart = await db.carts.find_one({"user_id": current_user.id})
@@ -290,16 +237,13 @@ async def add_to_cart(item: CartItem, current_user: UserResponse = Depends(get_c
         await db.carts.insert_one(cart.dict())
     else:
         cart_obj = Cart(**cart)
-        # Check if item already exists
         existing_item = next((i for i in cart_obj.items if i.product_id == item.product_id), None)
         if existing_item:
             existing_item.quantity += item.quantity
         else:
             cart_obj.items.append(item)
-        
         cart_obj.updated_at = datetime.utcnow()
         await db.carts.replace_one({"user_id": current_user.id}, cart_obj.dict())
-    
     return {"message": "Item added to cart"}
 
 @api_router.delete("/cart/remove/{product_id}")
@@ -310,7 +254,6 @@ async def remove_from_cart(product_id: str, current_user: UserResponse = Depends
         cart_obj.items = [item for item in cart_obj.items if item.product_id != product_id]
         cart_obj.updated_at = datetime.utcnow()
         await db.carts.replace_one({"user_id": current_user.id}, cart_obj.dict())
-    
     return {"message": "Item removed from cart"}
 
 @api_router.put("/cart/clear")
@@ -321,21 +264,16 @@ async def clear_cart(current_user: UserResponse = Depends(get_current_user)):
         cart_obj.items = []
         cart_obj.updated_at = datetime.utcnow()
         await db.carts.replace_one({"user_id": current_user.id}, cart_obj.dict())
-    
     return {"message": "Cart cleared"}
 
-# Payment routes
 @api_router.post("/payments/checkout")
 async def create_checkout_session(checkout_data: CheckoutRequest, current_user: UserResponse = Depends(get_current_user)):
-    # Calculate total amount from cart items
     total_amount = 0.0
     product_details = []
-    
     for item in checkout_data.items:
         product = await db.products.find_one({"id": item.product_id})
         if not product:
             raise HTTPException(status_code=404, detail=f"Product {item.product_id} not found")
-        
         item_total = float(product["price"]) * item.quantity
         total_amount += item_total
         product_details.append({
@@ -345,24 +283,17 @@ async def create_checkout_session(checkout_data: CheckoutRequest, current_user: 
             "quantity": item.quantity,
             "total": item_total
         })
-    
     if total_amount <= 0:
         raise HTTPException(status_code=400, detail="Invalid cart total")
-    
-    # Create success and cancel URLs
     success_url = f"{checkout_data.origin_url}/payment/success?session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{checkout_data.origin_url}/payment/cancel"
-    
-    # Create metadata
     metadata = {
         "user_id": current_user.id,
         "user_email": current_user.email,
         "product_count": str(len(checkout_data.items)),
         "source": "ecommerce_cart"
     }
-    
     try:
-        # Create Stripe checkout session
         checkout_request = CheckoutSessionRequest(
             amount=total_amount,
             currency="usd",
@@ -370,10 +301,7 @@ async def create_checkout_session(checkout_data: CheckoutRequest, current_user: 
             cancel_url=cancel_url,
             metadata=metadata
         )
-        
         session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(checkout_request)
-        
-        # Store payment transaction in database
         payment_transaction = PaymentTransaction(
             user_id=current_user.id,
             session_id=session.session_id,
@@ -381,21 +309,15 @@ async def create_checkout_session(checkout_data: CheckoutRequest, current_user: 
             currency="usd",
             status="pending",
             payment_status="unpaid",
-            metadata={
-                **metadata,
-                "product_details": str(product_details)
-            }
+            metadata={**metadata, "product_details": str(product_details)}
         )
-        
         await db.payment_transactions.insert_one(payment_transaction.dict())
-        
         return {
             "url": session.url,
             "session_id": session.session_id,
             "amount": total_amount,
             "currency": "usd"
         }
-        
     except Exception as e:
         logger.error(f"Error creating checkout session: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to create checkout session")
@@ -403,22 +325,13 @@ async def create_checkout_session(checkout_data: CheckoutRequest, current_user: 
 @api_router.get("/payments/status/{session_id}", response_model=PaymentStatusResponse)
 async def get_payment_status(session_id: str, current_user: UserResponse = Depends(get_current_user)):
     try:
-        # Get payment status from Stripe
         checkout_status: CheckoutStatusResponse = await stripe_checkout.get_checkout_status(session_id)
-        
-        # Find the payment transaction in our database
         transaction = await db.payment_transactions.find_one({"session_id": session_id})
         if not transaction:
             raise HTTPException(status_code=404, detail="Payment transaction not found")
-        
-        # Check if user owns this transaction
         if transaction["user_id"] != current_user.id:
             raise HTTPException(status_code=403, detail="Access denied")
-        
-        # Update transaction status if it has changed
-        if (transaction["status"] != checkout_status.status or 
-            transaction["payment_status"] != checkout_status.payment_status):
-            
+        if (transaction["status"] != checkout_status.status or transaction["payment_status"] != checkout_status.payment_status):
             await db.payment_transactions.update_one(
                 {"session_id": session_id},
                 {
@@ -429,23 +342,19 @@ async def get_payment_status(session_id: str, current_user: UserResponse = Depen
                     }
                 }
             )
-            
-            # If payment is successful, clear the user's cart
             if checkout_status.payment_status == "paid":
                 await db.carts.update_one(
                     {"user_id": current_user.id},
                     {"$set": {"items": [], "updated_at": datetime.utcnow()}}
                 )
-        
         return PaymentStatusResponse(
             status=checkout_status.status,
             payment_status=checkout_status.payment_status,
-            amount_total=checkout_status.amount_total / 100,  # Convert from cents
+            amount_total=checkout_status.amount_total / 100,  # cents to dollars
             currency=checkout_status.currency,
             transaction_id=transaction["id"],
             message=f"Payment is {checkout_status.payment_status}"
         )
-        
     except Exception as e:
         logger.error(f"Error getting payment status: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get payment status")
@@ -455,16 +364,15 @@ async def get_user_transactions(current_user: UserResponse = Depends(get_current
     transactions = await db.payment_transactions.find(
         {"user_id": current_user.id}
     ).sort("created_at", -1).to_list(50)
-    
     return [PaymentTransaction(**transaction) for transaction in transactions]
 
-# Include the router in the main app
+# Include the router in the app
 app.include_router(api_router)
 
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+allow_origins=["https://https-cf3869ff-5374-4968-9d28-1ff1d-gold.vercel.app"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
